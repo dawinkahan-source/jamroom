@@ -10,15 +10,16 @@ const rooms = new Map();
 const randomRoom = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 function getRoom(code) {
-  if (!rooms.has(code)) rooms.set(code, { videoId:'', bpm:120, beats:4, playing:false, startedAt:0, position:0, metro:false, metroStart:0, members:new Map() });
+  if (!rooms.has(code)) rooms.set(code, { videoId:'', bpm:120, beats:4, playing:false, startedAt:0, position:0, metro:false, metroStart:0, beatOffsetMs:0, alignMode:'manual', members:new Map() });
   return rooms.get(code);
 }
 function currentPosition(room, now=Date.now()) {
   return Math.max(0, room.position + (room.playing ? Math.max(0, now-room.startedAt)/1000 : 0));
 }
 function publicState(room) {
-  return { videoId: room.videoId, bpm:room.bpm, beats:room.beats, playing:room.playing, startedAt:room.startedAt, position:room.position, metro:room.metro, metroStart:room.metroStart, members:[...room.members.values()] };
+  return { videoId: room.videoId, bpm:room.bpm, beats:room.beats, playing:room.playing, startedAt:room.startedAt, position:room.position, metro:room.metro, metroStart:room.metroStart, beatOffsetMs:room.beatOffsetMs, alignMode:room.alignMode, members:[...room.members.values()] };
 }
+function reanchor(room, now=Date.now()) { if (room.playing) room.metroStart=room.startedAt-room.position*1000+room.beatOffsetMs; else if (room.metro) room.metroStart=now+800; }
 function publish(code) { io.to(code).emit('room:state', publicState(getRoom(code))); }
 io.on('connection', socket => {
   let roomCode = null;
@@ -48,31 +49,43 @@ io.on('connection', socket => {
         if (!room.videoId) return ack?.({ok:false,error:'ใส่ลิงก์เพลงก่อน'});
         room.position=clamp(Number.isFinite(Number(update.position)) ? Number(update.position) : currentPosition(room,now),0,86400);
         room.startedAt=now+2000;
-        room.playing=true;
+        room.playing=true; reanchor(room,now);
         break;
       case 'pause':
-        room.position=currentPosition(room,now); room.playing=false; room.startedAt=0; break;
+        room.position=currentPosition(room,now); room.playing=false; room.startedAt=0; if (room.metro) room.metroStart=now+800; break;
       case 'seek':
         room.position=clamp(Number(update.position)||0,0,86400);
-        if (room.playing) room.startedAt=now+1400;
+        if (room.playing) room.startedAt=now+1400; reanchor(room,now);
         break;
       case 'bpm': {
         room.bpm=clamp(Math.round(Number(update.bpm)||120),30,300);
-        if (room.metro) room.metroStart=now+1800;
+        reanchor(room,now);
         break;
       }
       case 'beats':
         room.beats=clamp(Math.round(Number(update.beats)||4),1,12);
-        if (room.metro) room.metroStart=now+1800;
+        reanchor(room,now);
         break;
       case 'metro':
         room.metro=!!update.enabled;
-        room.metroStart=room.metro?now+1800:0;
+        room.metroStart=room.metro?now+800:0; if(room.metro) reanchor(room,now);
         break;
       case 'restart':
         room.position=0;
-        if (room.playing) room.startedAt=now+2000;
+        if (room.playing) room.startedAt=now+2000; reanchor(room,now);
         break;
+      case 'align': {
+        const offset=Number(update.beatOffsetMs);
+        if(!Number.isFinite(offset))return ack?.({ok:false,error:'จังหวะไม่ถูกต้อง'});
+        room.beatOffsetMs=clamp(Math.round(offset),-86400000,86400000);
+        room.alignMode=update.alignMode==='auto'?'auto':'manual';
+        if(update.bpm!==undefined)room.bpm=clamp(Math.round(Number(update.bpm)||120),30,300);
+        reanchor(room,now);break;
+      }
+      case 'nudge': {
+        room.beatOffsetMs=clamp(room.beatOffsetMs+clamp(Math.round(Number(update.ms)||0),-500,500),-86400000,86400000);
+        room.alignMode='manual'; reanchor(room,now);break;
+      }
       default: return ack?.({ok:false,error:'คำสั่งไม่ถูกต้อง'});
     }
     publish(roomCode);
